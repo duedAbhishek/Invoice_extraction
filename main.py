@@ -100,6 +100,37 @@ def find_tax(text):
     # that's the standard way Indian invoices report combined GST.
     return round(sum(tax_amounts), 2)
 
+def find_amount(text):
+    labeled_patterns = [
+        r"Sub\s*[- ]?total[^\d]*([\d,]+\.\d{1,2})",
+        r"\bNet\s*Amount[^\d]*([\d,]+\.\d{1,2})",
+        r"\bTaxable\s*(?:Value|Amount)[^\d]*([\d,]+\.\d{1,2})",
+        r"\bBase\s*(?:Price|Amount|Value)[^\d]*([\d,]+\.\d{1,2})",
+        r"\bPre[- ]?tax\s*(?:Amount|Value)?[^\d]*([\d,]+\.\d{1,2})",
+        r"\bAmount\s*Before\s*Tax[^\d]*([\d,]+\.\d{1,2})",
+    ]
+    for pattern in labeled_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            value = clean_number(match.group(1))
+            if value is not None:
+                return value
+
+    # Last resort only: if there's no discount/shipping line AND no subtotal label at all,
+    # total - tax happens to equal subtotal. Check for absence of those adjustment words
+    # before trusting this, to reduce (not eliminate) the risk of a wrong guess.
+    if not re.search(r"\b(discount|shipping|rounding|adjustment)\b", text, re.IGNORECASE):
+        total_match = re.search(
+            r"\b(?:Total|Grand\s*Total|Total\s*Due|Amount\s*Due)[^\d]*([\d,]+\.\d{1,2})",
+            text, re.IGNORECASE
+        )
+        total = clean_number(total_match.group(1)) if total_match else None
+        tax_value = find_tax(text)
+        if total is not None and tax_value is not None:
+            return round(total - tax_value, 2)
+
+    return None
+
 @app.post("/extract")
 def extract_invoice(req: InvoiceRequest):
     text = req.invoice_text
@@ -133,11 +164,11 @@ def extract_invoice(req: InvoiceRequest):
     # --- amount (subtotal, before tax) ---
     # Key fix: [^\d]* means "skip over any non-digit junk" — dots, dashes, spaces, Rs, colons, all of it —
     # until we hit the actual number.
-    amount_raw = find([
-        r"Sub\s*[- ]?total[^\d]*([\d,]+\.?\d*)",
-        r"\bAmount[^\d]*([\d,]+\.?\d*)",
-    ], text)
-    amount = clean_number(amount_raw)
+    # amount_raw = find([
+    #     r"Sub\s*[- ]?total[^\d]*([\d,]+\.?\d*)",
+    #     r"\bAmount[^\d]*([\d,]+\.?\d*)",
+    # ], text)
+    amount = find_amount(text)
 
     # --- tax ---
     # tax_raw = find([
