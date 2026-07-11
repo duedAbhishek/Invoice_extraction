@@ -140,8 +140,10 @@ def extract_invoice(req: InvoiceRequest):
     amount = clean_number(amount_raw)
 
     # --- tax ---
-    tax_raw = find_tax(text)
-    tax = clean_number(tax_raw)
+    # tax_raw = find([
+    #     r"\b(?:IGST|CGST|SGST|GST|VAT|Tax)\s*(?:\([\d.%]+\))?[^\d]*([\d,]+\.?\d*)",
+    # ], text)
+    tax = find_tax(text)
 
     # --- currency ---
     currency_raw = find([r"\bCurrency[:\-\s]+([A-Za-z]+)"], text)
