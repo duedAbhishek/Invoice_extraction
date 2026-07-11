@@ -78,6 +78,28 @@ def find_invoice_no_fallback(text):
 
     return None
 
+def find_tax(text):
+    tax_amounts = []
+
+    # Look at each line separately — safer than scanning the whole blob at once,
+    # since it stops one tax line's number from leaking into the next line's match.
+    for line in text.split("\n"):
+        if re.search(r"\b(?:IGST|CGST|SGST|GST|VAT|Tax)\b", line, re.IGNORECASE):
+            # Require a proper money-shaped number (has a decimal point, e.g. 238.50)
+            # and make sure it's NOT immediately followed by a % sign — that guards
+            # against accidentally grabbing the tax *rate* instead of the tax *amount*.
+            match = re.search(r"([\d,]+\.\d{1,2})(?!\s*%)", line)
+            if match:
+                tax_amounts.append(clean_number(match.group(1)))
+
+    if not tax_amounts:
+        return None
+
+    # If there's exactly one tax line, use it directly.
+    # If there are multiple (e.g. CGST + SGST split), sum them —
+    # that's the standard way Indian invoices report combined GST.
+    return round(sum(tax_amounts), 2)
+
 @app.post("/extract")
 def extract_invoice(req: InvoiceRequest):
     text = req.invoice_text
@@ -118,9 +140,7 @@ def extract_invoice(req: InvoiceRequest):
     amount = clean_number(amount_raw)
 
     # --- tax ---
-    tax_raw = find([
-        r"\b(?:IGST|CGST|SGST|GST|VAT|Tax)\s*(?:\([\d.%]+\))?[^\d]*([\d,]+\.?\d*)",
-    ], text)
+    tax_raw = find_tax(text)
     tax = clean_number(tax_raw)
 
     # --- currency ---
