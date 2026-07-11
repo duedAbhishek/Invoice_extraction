@@ -13,37 +13,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class InvoiceRequest(BaseModel):
     invoice_text: str
 
 
-def clean_number(raw: str):
+def safe_extract(func, *args, **kwargs):
+    """Never let one field's bug crash the whole response."""
+    try:
+        return func(*args, **kwargs)
+    except Exception as e:
+        print(f"Extraction error in {func.__name__}: {e}")
+        return None
+
+
+def clean_number(raw):
     if not raw:
         return None
-    cleaned = raw.replace(",", "").strip()
+    cleaned = str(raw).replace(",", "").strip()
     try:
         return float(cleaned)
     except ValueError:
         return None
 
 
-def find(patterns, text):
-    """Try a list of regex patterns in order, return first match's group 1."""
+def find(patterns, text, flags=re.IGNORECASE):
     for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
+        match = re.search(pattern, text, flags)
         if match:
             return match.group(1).strip()
     return None
 
 
-def detect_currency(text):
-    if re.search(r"\bINR\b|Rs\.?|₹", text):
-        return "INR"
-    if re.search(r"\bUSD\b|\$", text):
-        return "USD"
-    if re.search(r"\bEUR\b|€", text):
-        return "EUR"
-    return None
+# ---------------- invoice_no ----------------
 
 def find_invoice_no(text):
     labeled_patterns = [
@@ -54,55 +56,86 @@ def find_invoice_no(text):
         r"\bVoucher\s*(?:No\.?|#)?[:\-\s]+([A-Za-z0-9\-\/]+)",
         r"\bOrder\s*(?:ID|No\.?|#)?[:\-\s]+([A-Za-z0-9\-\/]+)",
         r"\bTxn\.?\s*(?:ID|No\.?)?[:\-\s]+([A-Za-z0-9\-\/]+)",
-        r"\bInvoice[:\-\s]+([A-Za-z0-9\-\/]+)",  # bare "Invoice:"
+        r"\bInvoice[:\-\s]+([A-Za-z0-9\-\/]+)",
     ]
     for pattern in labeled_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            candidate = match.group(1).strip()
+            candidate = match.group(1).strip().rstrip(".,;:")
             if re.search(r"\d", candidate):
                 return candidate
 
-    # Layer 2 fallback — see Step 3
-    return find_invoice_no_fallback(text)
-
-def find_invoice_no_fallback(text):
-    # Only look at the first ~5 lines — invoice numbers live near the header,
-    # not buried inside item descriptions or totals further down.
     header = "\n".join(text.split("\n")[:5])
-
-    # Matches patterns like: INV-2026-0041, YZ-9900, NS/2026/778, AB12345
     match = re.search(r"\b([A-Za-z]{2,5}[\-\/][A-Za-z0-9\-\/]{2,15})\b", header)
     if match:
-        return match.group(1).strip()
+        candidate = match.group(1).strip().rstrip(".,;:")
+        if re.search(r"\d", candidate):
+            return candidate
 
     return None
 
-def find_tax(text):
-    tax_amounts = []
 
-    # Look at each line separately — safer than scanning the whole blob at once,
-    # since it stops one tax line's number from leaking into the next line's match.
-    for line in text.split("\n"):
-        if re.search(r"\b(?:IGST|CGST|SGST|GST|VAT|Tax)\b", line, re.IGNORECASE):
-            # Require a proper money-shaped number (has a decimal point, e.g. 238.50)
-            # and make sure it's NOT immediately followed by a % sign — that guards
-            # against accidentally grabbing the tax *rate* instead of the tax *amount*.
-            match = re.search(r"([\d,]+\.\d{1,2})(?!\s*%)", line)
-            if match:
-                tax_amounts.append(clean_number(match.group(1)))
+# ---------------- date ----------------
 
-    if not tax_amounts:
+def find_date(text):
+    date_raw = find([
+        r"\bInvoice\s*Date[:\-\s]+([0-9A-Za-z ,\-\/]+)",
+        r"\bDate[:\-\s]+([0-9A-Za-z ,\-\/]+)",
+        r"\bIssued(?:\s*(?:on|Date))?[:\-\s]+([0-9A-Za-z ,\-\/]+)",
+        r"\bDated[:\-\s]+([0-9A-Za-z ,\-\/]+)",
+    ], text)
+
+    if not date_raw:
         return None
 
-    # If there's exactly one tax line, use it directly.
-    # If there are multiple (e.g. CGST + SGST split), sum them —
-    # that's the standard way Indian invoices report combined GST.
-    return round(sum(tax_amounts), 2)
+    date_raw = date_raw.split("\n")[0].strip()
+    # trim trailing junk words that might get swept in (e.g. "Vendor" from next line)
+    date_raw = re.sub(r"[A-Za-z]{4,}$", "", date_raw).strip()
+    date_raw = date_raw.rstrip(".,;:")
+    if not date_raw:
+        return None
+
+    try:
+        parsed = dateparser.parse(date_raw, dayfirst=True, fuzzy=True)
+        if parsed is None:
+            return None
+        return parsed.strftime("%Y-%m-%d")
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+# ---------------- vendor ----------------
+
+STOPWORDS_AFTER_VENDOR = {"invoice", "bill", "date", "gst", "tax", "total", "subtotal"}
+
+def find_vendor(text):
+    vendor = find([
+        r"\bVendor(?:\s*Name)?[:\-\s]+(.+)",
+        r"\bSupplier(?:\s*Name)?[:\-\s]+(.+)",
+        r"\bSeller[:\-\s]+(.+)",
+        r"\bClient[:\-\s]+(.+)",
+        r"\bFrom[:\-\s]+(.+)",
+        r"\bBilled\s*By[:\-\s]+(.+)",
+    ], text)
+
+    if not vendor:
+        return None
+
+    vendor = vendor.split("\n")[0].strip().rstrip(".,;:—-")
+    if not vendor:
+        return None
+    # guard against grabbing a label word instead of a real name
+    if vendor.lower() in STOPWORDS_AFTER_VENDOR:
+        return None
+    return vendor
+
+
+# ---------------- amount (strictly subtotal / pre-tax) ----------------
 
 def find_amount(text):
     labeled_patterns = [
         r"Sub\s*[- ]?total[^\d]*([\d,]+\.\d{1,2})",
+        r"Sub\s*[- ]?total[^\d]*([\d,]+)",
         r"\bNet\s*Amount[^\d]*([\d,]+\.\d{1,2})",
         r"\bTaxable\s*(?:Value|Amount)[^\d]*([\d,]+\.\d{1,2})",
         r"\bBase\s*(?:Price|Amount|Value)[^\d]*([\d,]+\.\d{1,2})",
@@ -115,76 +148,53 @@ def find_amount(text):
             value = clean_number(match.group(1))
             if value is not None:
                 return value
-
-    # Last resort only: if there's no discount/shipping line AND no subtotal label at all,
-    # total - tax happens to equal subtotal. Check for absence of those adjustment words
-    # before trusting this, to reduce (not eliminate) the risk of a wrong guess.
-    if not re.search(r"\b(discount|shipping|rounding|adjustment)\b", text, re.IGNORECASE):
-        total_match = re.search(
-            r"\b(?:Total|Grand\s*Total|Total\s*Due|Amount\s*Due)[^\d]*([\d,]+\.\d{1,2})",
-            text, re.IGNORECASE
-        )
-        total = clean_number(total_match.group(1)) if total_match else None
-        tax_value = find_tax(text)
-        if total is not None and tax_value is not None:
-            return round(total - tax_value, 2)
-
     return None
+
+
+# ---------------- tax ----------------
+
+def find_tax(text):
+    tax_amounts = []
+    for line in text.split("\n"):
+        if re.search(r"\b(?:IGST|CGST|SGST|GST|VAT|Tax)\b", line, re.IGNORECASE):
+            match = re.search(r"([\d,]+\.\d{1,2})(?!\s*%)", line)
+            if match:
+                value = clean_number(match.group(1))
+                if value is not None:
+                    tax_amounts.append(value)
+
+    if not tax_amounts:
+        return None
+    return round(sum(tax_amounts), 2)
+
+
+# ---------------- currency ----------------
+
+def find_currency(text):
+    currency_raw = find([r"\bCurrency[:\-\s]+([A-Za-z]{3})"], text)
+    if currency_raw:
+        return currency_raw.upper()
+
+    if re.search(r"\bINR\b|Rs\.?\s|₹", text):
+        return "INR"
+    if re.search(r"\bUSD\b|\$", text):
+        return "USD"
+    if re.search(r"\bEUR\b|€", text):
+        return "EUR"
+    if re.search(r"\bGBP\b|£", text):
+        return "GBP"
+    return None
+
 
 @app.post("/extract")
 def extract_invoice(req: InvoiceRequest):
-    text = req.invoice_text
-
-    # --- invoice_no: try several common labels ---
-    invoice_no = find_invoice_no(text)
-
-    # --- date: try several common labels ---
-    date_raw = find([
-        r"\bDate[:\-\s]+([0-9A-Za-z ,\-\/]+)",
-        r"\bIssued(?:\s*(?:on|Date))?[:\-\s]+([0-9A-Za-z ,\-\/]+)",
-        r"\bDated[:\-\s]+([0-9A-Za-z ,\-\/]+)",
-    ], text)
-    date_iso = None
-    if date_raw:
-        try:
-            date_iso = dateparser.parse(date_raw.strip(), dayfirst=True, fuzzy=True).strftime("%Y-%m-%d")
-        except (ValueError, TypeError):
-            date_iso = None
-
-    # --- vendor: try several common labels ---
-    vendor = find([
-        r"\bVendor[:\-\s]+(.+)",
-        r"\bClient[:\-\s]+(.+)",
-        r"\bSupplier[:\-\s]+(.+)",
-        r"\bFrom[:\-\s]+(.+)",
-    ], text)
-    if vendor:
-        vendor = vendor.split("\n")[0].strip()  # only take the first line after the label
-
-    # --- amount (subtotal, before tax) ---
-    # Key fix: [^\d]* means "skip over any non-digit junk" — dots, dashes, spaces, Rs, colons, all of it —
-    # until we hit the actual number.
-    # amount_raw = find([
-    #     r"Sub\s*[- ]?total[^\d]*([\d,]+\.?\d*)",
-    #     r"\bAmount[^\d]*([\d,]+\.?\d*)",
-    # ], text)
-    amount = find_amount(text)
-
-    # --- tax ---
-    # tax_raw = find([
-    #     r"\b(?:IGST|CGST|SGST|GST|VAT|Tax)\s*(?:\([\d.%]+\))?[^\d]*([\d,]+\.?\d*)",
-    # ], text)
-    tax = find_tax(text)
-
-    # --- currency ---
-    currency_raw = find([r"\bCurrency[:\-\s]+([A-Za-z]+)"], text)
-    currency = currency_raw.upper() if currency_raw else detect_currency(text)
+    text = req.invoice_text or ""
 
     return {
-        "invoice_no": invoice_no,
-        "date": date_iso,
-        "vendor": vendor,
-        "amount": amount,
-        "tax": tax,
-        "currency": currency,
+        "invoice_no": safe_extract(find_invoice_no, text),
+        "date": safe_extract(find_date, text),
+        "vendor": safe_extract(find_vendor, text),
+        "amount": safe_extract(find_amount, text),
+        "tax": safe_extract(find_tax, text),
+        "currency": safe_extract(find_currency, text),
     }
