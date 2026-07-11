@@ -46,20 +46,36 @@ def detect_currency(text):
     return None
 
 def find_invoice_no(text):
-    patterns = [
-        r"Invoice\s*(?:No\.?|Number|#)[:\-\s]+([A-Za-z0-9\-\/]+)",  # "No" now required, not optional
-        r"\bRef(?:erence)?[:\-\s]+([A-Za-z0-9\-\/]+)",
-        r"\bBill\s*No[:\-\s]+([A-Za-z0-9\-\/]+)",
-        r"\bInvoice[:\-\s]+([A-Za-z0-9\-\/]+)",  # last resort: bare "Invoice:"
+    labeled_patterns = [
+        r"Invoice\s*(?:No\.?|Number|#)[:\-\s]+([A-Za-z0-9\-\/]+)",
+        r"\bRef(?:erence)?\.?\s*(?:No\.?|#)?[:\-\s]+([A-Za-z0-9\-\/]+)",
+        r"\bBill\s*No\.?[:\-\s]+([A-Za-z0-9\-\/]+)",
+        r"\bDoc(?:ument)?\s*(?:No\.?|#)?[:\-\s]+([A-Za-z0-9\-\/]+)",
+        r"\bVoucher\s*(?:No\.?|#)?[:\-\s]+([A-Za-z0-9\-\/]+)",
+        r"\bOrder\s*(?:ID|No\.?|#)?[:\-\s]+([A-Za-z0-9\-\/]+)",
+        r"\bTxn\.?\s*(?:ID|No\.?)?[:\-\s]+([A-Za-z0-9\-\/]+)",
+        r"\bInvoice[:\-\s]+([A-Za-z0-9\-\/]+)",  # bare "Invoice:"
     ]
-    for pattern in patterns:
+    for pattern in labeled_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             candidate = match.group(1).strip()
-            # Safety check: a real invoice number almost always has a digit.
-            # If it's just a plain word (like "Invoice" or "Number"), skip it and try the next pattern.
             if re.search(r"\d", candidate):
                 return candidate
+
+    # Layer 2 fallback — see Step 3
+    return find_invoice_no_fallback(text)
+
+def find_invoice_no_fallback(text):
+    # Only look at the first ~5 lines — invoice numbers live near the header,
+    # not buried inside item descriptions or totals further down.
+    header = "\n".join(text.split("\n")[:5])
+
+    # Matches patterns like: INV-2026-0041, YZ-9900, NS/2026/778, AB12345
+    match = re.search(r"\b([A-Za-z]{2,5}[\-\/][A-Za-z0-9\-\/]{2,15})\b", header)
+    if match:
+        return match.group(1).strip()
+
     return None
 
 @app.post("/extract")
