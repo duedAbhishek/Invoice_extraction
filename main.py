@@ -45,17 +45,29 @@ def detect_currency(text):
         return "EUR"
     return None
 
+def find_invoice_no(text):
+    patterns = [
+        r"Invoice\s*(?:No\.?|Number|#)[:\-\s]+([A-Za-z0-9\-\/]+)",  # "No" now required, not optional
+        r"\bRef(?:erence)?[:\-\s]+([A-Za-z0-9\-\/]+)",
+        r"\bBill\s*No[:\-\s]+([A-Za-z0-9\-\/]+)",
+        r"\bInvoice[:\-\s]+([A-Za-z0-9\-\/]+)",  # last resort: bare "Invoice:"
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            candidate = match.group(1).strip()
+            # Safety check: a real invoice number almost always has a digit.
+            # If it's just a plain word (like "Invoice" or "Number"), skip it and try the next pattern.
+            if re.search(r"\d", candidate):
+                return candidate
+    return None
 
 @app.post("/extract")
 def extract_invoice(req: InvoiceRequest):
     text = req.invoice_text
 
     # --- invoice_no: try several common labels ---
-    invoice_no = find([
-        r"Invoice\s*(?:No|Number|#)?[:\-\s]+([A-Za-z0-9\-\/]+)",
-        r"\bRef(?:erence)?[:\-\s]+([A-Za-z0-9\-\/]+)",
-        r"\bBill\s*No[:\-\s]+([A-Za-z0-9\-\/]+)",
-    ], text)
+    invoice_no = find_invoice_no(text)
 
     # --- date: try several common labels ---
     date_raw = find([
