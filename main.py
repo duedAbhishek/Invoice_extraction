@@ -132,24 +132,23 @@ def find_vendor(text):
 
 # ---------------- amount (strictly subtotal / pre-tax) ----------------
 
-# ---------------- amount (strictly subtotal / pre-tax) ----------------
-
 def find_amount(text):
-    # We order these from most specific to least specific.
-    # It will check for "Subtotal" first, and if it fails, it will just look for "Amount".
     labeled_patterns = [
-        r"Sub\s*[- ]?total[^\d]*([\d,]+\.\d{1,2})",
-        r"Sub\s*[- ]?total[^\d]*([\d,]+)",
-        r"\bNet\s*Amount[^\d]*([\d,]+\.\d{1,2})",
-        r"\bTaxable\s*(?:Value|Amount)[^\d]*([\d,]+\.\d{1,2})",
-        r"\bBase\s*(?:Price|Amount|Value)[^\d]*([\d,]+\.\d{1,2})",
-        r"\bPre[- ]?tax\s*(?:Amount|Value)?[^\d]*([\d,]+\.\d{1,2})",
-        r"\bAmount\s*Before\s*Tax[^\d]*([\d,]+\.\d{1,2})",
+        # First, look for strict Subtotal/Pre-tax words
+        r"Sub\s*[- ]?total[^\d]*([\d,]+(?:\.\d{1,2})?)",
+        r"\bNet\s*Amount[^\d]*([\d,]+(?:\.\d{1,2})?)",
+        r"\bTaxable\s*(?:Value|Amount)[^\d]*([\d,]+(?:\.\d{1,2})?)",
+        r"\bBase\s*(?:Price|Amount|Value)[^\d]*([\d,]+(?:\.\d{1,2})?)",
+        r"\bPre[- ]?tax\s*(?:Amount|Value)?[^\d]*([\d,]+(?:\.\d{1,2})?)",
+        r"\bAmount\s*Before\s*Tax[^\d]*([\d,]+(?:\.\d{1,2})?)",
         
-        # --- NEW FALLBACKS ADDED BELOW ---
-        # If none of the above match, just look for "Amount" followed by a number
-        r"\bAmount[^\d]*([\d,]+\.\d{1,2})", 
-        r"\bAmount[^\d]*([\d,]+)",
+        # Next fallback: Look for general "Amount" or "Price"
+        r"\bAmount[^\d]*([\d,]+(?:\.\d{1,2})?)",
+        r"\bPrice[^\d]*([\d,]+(?:\.\d{1,2})?)",
+        
+        # Last resort fallback: Look for "Total" or "Grand Total"
+        r"\bGrand\s*Total[^\d]*([\d,]+(?:\.\d{1,2})?)",
+        r"\bTotal[^\d]*([\d,]+(?:\.\d{1,2})?)",
     ]
     
     for pattern in labeled_patterns:
@@ -165,9 +164,11 @@ def find_amount(text):
 
 def find_tax(text):
     tax_amounts = []
+    # Split the text line by line to search for tax keywords
     for line in text.split("\n"):
         if re.search(r"\b(?:IGST|CGST|SGST|GST|VAT|Tax)\b", line, re.IGNORECASE):
-            match = re.search(r"([\d,]+\.\d{1,2})(?!\s*%)", line)
+            # FIXED: Made the decimal part optional so it captures whole numbers like "500"
+            match = re.search(r"([\d,]+(?:\.\d{1,2})?)(?!\s*%)", line)
             if match:
                 value = clean_number(match.group(1))
                 if value is not None:
@@ -175,6 +176,8 @@ def find_tax(text):
 
     if not tax_amounts:
         return None
+    
+    # Sum up all tax lines found (e.g., if there is both CGST and SGST)
     return round(sum(tax_amounts), 2)
 
 
