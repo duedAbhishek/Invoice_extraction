@@ -132,7 +132,11 @@ def find_vendor(text):
 
 # ---------------- amount (strictly subtotal / pre-tax) ----------------
 
+# ---------------- amount (strictly subtotal / pre-tax) ----------------
+
 def find_amount(text):
+    # We order these from most specific to least specific.
+    # It will check for "Subtotal" first, and if it fails, it will just look for "Amount".
     labeled_patterns = [
         r"Sub\s*[- ]?total[^\d]*([\d,]+\.\d{1,2})",
         r"Sub\s*[- ]?total[^\d]*([\d,]+)",
@@ -141,7 +145,13 @@ def find_amount(text):
         r"\bBase\s*(?:Price|Amount|Value)[^\d]*([\d,]+\.\d{1,2})",
         r"\bPre[- ]?tax\s*(?:Amount|Value)?[^\d]*([\d,]+\.\d{1,2})",
         r"\bAmount\s*Before\s*Tax[^\d]*([\d,]+\.\d{1,2})",
+        
+        # --- NEW FALLBACKS ADDED BELOW ---
+        # If none of the above match, just look for "Amount" followed by a number
+        r"\bAmount[^\d]*([\d,]+\.\d{1,2})", 
+        r"\bAmount[^\d]*([\d,]+)",
     ]
+    
     for pattern in labeled_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
@@ -189,7 +199,7 @@ def find_currency(text):
 @app.post("/extract")
 def extract_invoice(req: InvoiceRequest):
     text = req.invoice_text or ""
-
+    
     return {
         "invoice_no": safe_extract(find_invoice_no, text),
         "date": safe_extract(find_date, text),
